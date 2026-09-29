@@ -1,0 +1,21 @@
+# ============================================================================
+#  main/idf_component.yml
+#
+#  Манифест зависимостей проекта. Читается менеджером компонентов ESP-IDF
+#  при сборке. Все указанные компоненты скачиваются из официального реестра
+#  components.espressif.com и кладутся в managed_components/.
+# ============================================================================
+
+dependencies:
+  # Драйвер шины 1-Wire. Базовая библиотека, от которой зависит ds18b20.
+  # Источник: https://components.espressif.com/components/espressif/onewire_bus
+  espressif/onewire_bus: "*"
+
+  # Драйвер датчика DS18B20. Требует onewire_bus.
+  # Источник: https://components.espressif.com/components/espressif/ds18b20
+  espressif/ds18b20: "*"
+
+  # Драйвер адресных светодиодов (WS2812, SK6812 и др.).
+  # Версия 3.x совместима с ESP-IDF v6.x.
+  # Источник: https://components.espressif.com/components/espressif/led_strip
+  espressif/led_strip: "^3.0.0"
