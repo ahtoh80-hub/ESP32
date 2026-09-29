@@ -30,11 +30,13 @@ extern "C"
     } indicator_source_t;
     // Перечисление источников ошибок. Расширяется при добавлении датчиков. [наш indicator.h]
 
-    // Возвращает esp_err_t — типовой код ошибки ESP-IDF. [ESP-IDF, esp_err.h]
-    // Возможные значения: ESP_OK, иные ESP_ERR_*.
     esp_err_t indicator_init(int gpio_num);
-    // Инициализация агрегатора и запуск задачи индикации. [наш indicator.h]
+    // Инициализация агрегатора и запуск задачи индикации.
+    // Повторный вызов безопасен — вторая задача не создаётся. [наш indicator.h]
     // gpio_num — GPIO встроенного WS2812. [стандарт C, int]
+
+    esp_err_t indicator_deinit(void);
+    // Остановка задачи индикации, сброс масок, освобождение светодиода. [наш indicator.h]
 
     // Возвращает void — ничего. [стандарт C]
     void indicator_report_error(indicator_source_t src);

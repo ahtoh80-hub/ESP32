@@ -41,6 +41,23 @@ managed_components/
 # If ESP-IDF tools are installed/referenced locally to the project
 .espressif/
 
+# ESP-IDF build cache and generated files
+.idf_version
+idf_ext_build_depends.txt
+esp-idf-version
+ninja_log
+.ninja_*
+build/.bin_timestamp
+build/app-flash_args
+build/app-flash_args.in
+build/bootloader/.ninja_*
+build/bootloader/app-flash_args
+
+# ESP-IDF component manager cache
+managed_components/.cmake/
+managed_components/.git/
+managed_components/CMakeLists.txt.bak
+
 # CMake generated files
 CMakeCache.txt
 CMakeFiles/

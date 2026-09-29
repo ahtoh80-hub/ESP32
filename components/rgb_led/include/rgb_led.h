@@ -32,17 +32,16 @@ extern "C"
     extern const rgb_color_t RGB_COLOR_YELLOW; // (255,255,0). [наш rgb_led.h]
     extern const rgb_color_t RGB_COLOR_RED;    // (255,0,0). [наш rgb_led.h]
 
-    // Возвращает esp_err_t — типовой код ошибки ESP-IDF. [ESP-IDF, esp_err.h]
-    // Возможные значения: ESP_OK, иные ESP_ERR_*.
     esp_err_t rgb_led_init(int gpio_num);
-    // Инициализация светодиода на GPIO. [наш rgb_led.h]
+    // Инициализация светодиода на GPIO (повторный вызов безопасен). [наш rgb_led.h]
 
-    // Возвращает void — ничего. [стандарт C]
-    void rgb_led_set(const rgb_color_t *color);
-    // Установить цвет. [наш rgb_led.h]
+    esp_err_t rgb_led_deinit(void);
+    // Выключение светодиода и освобождение ресурсов. [наш rgb_led.h]
 
-    // Возвращает void — ничего. [стандарт C]
-    void rgb_led_off(void);
+    esp_err_t rgb_led_set(const rgb_color_t *color);
+    // Установить цвет; уже выведенный цвет повторно не отправляется. [наш rgb_led.h]
+
+    esp_err_t rgb_led_off(void);
     // Погасить светодиод. [наш rgb_led.h]
 
 #ifdef __cplusplus

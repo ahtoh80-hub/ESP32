@@ -1,7 +1,15 @@
 // ============================================================================
 //  components/ds18b20_sensor/include/ds18b20_sensor.h
 //
-//  Публичный API библиотеки для работы с датчиками DS18B20 по шине 1-Wire.
+//  Самодостаточная библиотека DS18B20 (шина 1-Wire).
+//  Библиотека сама создаёт шину на указанном GPIO, находит датчики,
+//  опрашивает их с заданным периодом (по умолчанию 1 раз в секунду)
+//  и хранит последние показания — main может читать их в любой момент.
+//  Пример использования из main:
+//
+//      ds18b20_sensor_set_period_ms(1000);   // период опроса (по умолчанию 1000 мс)
+//      ds18b20_sensor_run(4, 48);            // индикация + датчики + фоновый опрос
+//      ds18b20_sensor_get_temperature(0);    // чтение из кэша, без обращений к шине
 // ============================================================================
 
 #pragma once
@@ -9,6 +17,9 @@
 
 #include <stdbool.h>
 // Даёт тип bool, true, false. [стандарт C, stdbool.h]
+
+#include <stdint.h>
+// Даёт uint64_t. [стандарт C, stdint.h]
 
 #include "esp_err.h"
 // Даёт esp_err_t, ESP_OK, ESP_FAIL, ESP_ERR_*. [ESP-IDF, esp_err.h]
@@ -28,6 +39,12 @@ extern "C"
 #define DS18B20_TEMP_MAX_VALID (125.0f)
     // Верхняя допустимая температура DS18B20. [наш ds18b20_sensor.h]
 
+#define DS18B20_PERIOD_MS 1000
+    // Период опроса по умолчанию, мс — 1 раз в секунду. [наш ds18b20_sensor.h]
+
+#define DS18B20_PERIOD_MIN_MS 1000
+    // Минимальный период, мс: преобразование 12 бит занимает ≈800 мс. [наш ds18b20_sensor.h]
+
     typedef enum
     {
         DS18B20_STATUS_OK = 0,  // всё хорошо. [наш ds18b20_sensor.h]
@@ -43,35 +60,44 @@ extern "C"
     } ds18b20_reading_t;
     // Наша структура результата чтения. [наш ds18b20_sensor.h]
 
-    // Возвращает esp_err_t — типовой код ошибки ESP-IDF. [ESP-IDF, esp_err.h]
-    // Возможные значения: ESP_OK, ESP_ERR_NOT_FOUND, иные ESP_ERR_*.
     esp_err_t ds18b20_sensor_init(int gpio_num);
-    // Инициализация шины и поиск всех датчиков. [наш ds18b20_sensor.h]
+    // Создать шину на GPIO, найти датчики, задать разрешение 12 бит.
+    // Возвращает ESP_OK, ESP_ERR_NOT_FOUND (датчиков нет) или ESP_ERR_*. [наш ds18b20_sensor.h]
 
-    // Возвращает int — обычное целое число. [стандарт C]
+    esp_err_t ds18b20_sensor_deinit(void);
+    // Остановить опрос и освободить шину с датчиками.
+    // После этого библиотеку можно инициализировать снова. [наш ds18b20_sensor.h]
+
+    void ds18b20_sensor_set_period_ms(int period_ms);
+    // Задать период фонового опроса, мс (по умолчанию DS18B20_PERIOD_MS).
+    // Значения меньше DS18B20_PERIOD_MIN_MS заменяются на DS18B20_PERIOD_MS.
+    // Вызывать до ds18b20_sensor_start(). [наш ds18b20_sensor.h]
+
+    esp_err_t ds18b20_sensor_start(void);
+    // Запустить фоновый опрос. Без него можно читать вручную через read_all(). [наш ds18b20_sensor.h]
+
     int ds18b20_sensor_count(void);
     // Сколько датчиков найдено. [наш ds18b20_sensor.h]
 
-    // Возвращает esp_err_t — типовой код ошибки ESP-IDF. [ESP-IDF, esp_err.h]
-    // Возможные значения: ESP_OK, ESP_FAIL, ESP_ERR_INVALID_STATE.
     esp_err_t ds18b20_sensor_read_all(ds18b20_reading_t *readings);
-    // Прочитать температуру со всех датчиков. [наш ds18b20_sensor.h]
+    // Опросить все датчики прямо сейчас (блокирует ≈800 мс — время преобразования).
+    // readings может быть NULL — тогда результаты доступны через get_temperature(). [наш ds18b20_sensor.h]
 
-    // Возвращает ds18b20_status_t — наш enum из этого же заголовка. [наш ds18b20_sensor.h]
+    float ds18b20_sensor_get_temperature(int index);
+    // Последняя температура датчика, °C (из кэша). 0.0f при неверном index. [наш ds18b20_sensor.h]
+
+    ds18b20_status_t ds18b20_sensor_get_status(int index);
+    // Статус датчика из последнего чтения. ERROR при неверном index. [наш ds18b20_sensor.h]
+
     ds18b20_status_t ds18b20_sensor_overall_status(void);
-    // «Худший» статус после последнего чтения. [наш ds18b20_sensor.h]
+    // «Худший» статус среди всех датчиков. [наш ds18b20_sensor.h]
 
-    // ------------------------------------------------------------------------
-    //  ds18b20_sensor_run()
-    //
-    //  КРАТКО: Единая точка входа для main. Запускает indicator,
-    //          инициализирует датчики и уходит в бесконечный цикл опроса.
-    //
-    //  Возвращает void — ничего. [стандарт C]
-    //  Параметры: onewire_gpio — GPIO линии DQ. [стандарт C, int]
-    //             rgb_led_gpio — GPIO встроенного WS2812. [стандарт C, int]
-    // ------------------------------------------------------------------------
+    esp_err_t ds18b20_sensor_get_address(int index, uint64_t *address);
+    // 64-битный ROM-адрес датчика. ESP_ERR_INVALID_ARG при неверных параметрах. [наш ds18b20_sensor.h]
+
     void ds18b20_sensor_run(int onewire_gpio, int rgb_led_gpio);
+    // Единая точка входа для main: индикация + датчики + фоновый опрос.
+    // Возвращается сразу; нет датчиков — ds18b20_sensor_count() вернёт 0. [наш ds18b20_sensor.h]
 
 #ifdef __cplusplus
 }

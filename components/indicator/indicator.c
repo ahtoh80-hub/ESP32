@@ -57,6 +57,13 @@ static volatile uint32_t s_warnings = 0;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 // Спин-блокировка для защиты s_errors/s_warnings от гонок. [FreeRTOS, freertos/FreeRTOS.h]
 
+static TaskHandle_t s_task = NULL;
+// Дескриптор задачи индикации: NULL — задача не запущена. [FreeRTOS, freertos/task.h]
+
+static int s_state = -1;
+// Последнее выведенное состояние: -1 — старт, 0 — норма, 1 — предупреждение,
+// 2 — ошибка. Нужно только для логирования смены состояния. [наш indicator.c]
+
 // ============================================================================
 //  indicator_task()
 //
@@ -96,6 +103,13 @@ static void indicator_task(void *pvParameters)
         {
             // Есть хотя бы одна ошибка от любого источника — КРАСНЫЙ. [наш indicator.c]
 
+            if (s_state != 2)
+            {
+                // Состояние изменилось — сообщаем в лог один раз.
+                s_state = 2;
+                ESP_LOGE(TAG, "Индикация: ошибка");
+            }
+
             for (int i = 0; i < INDICATOR_BLINK_COUNT; i++)
             {
                 // Серия быстрых вспышек. [стандарт C]
@@ -120,6 +134,12 @@ static void indicator_task(void *pvParameters)
         {
             // Ошибок нет, но есть предупреждение — ЖЁЛТЫЙ. [наш indicator.c]
 
+            if (s_state != 1)
+            {
+                s_state = 1;
+                ESP_LOGW(TAG, "Индикация: предупреждение");
+            }
+
             rgb_led_set(&RGB_COLOR_YELLOW);
             // Горим жёлтым постоянно. [наш rgb_led.h]
 
@@ -129,6 +149,12 @@ static void indicator_task(void *pvParameters)
         else
         {
             // Ни ошибок, ни предупреждений — ЗЕЛЁНЫЙ. [наш indicator.c]
+
+            if (s_state != 0)
+            {
+                s_state = 0;
+                ESP_LOGI(TAG, "Индикация: норма");
+            }
 
             rgb_led_set(&RGB_COLOR_GREEN);
             // Горим зелёным постоянно. [наш rgb_led.h]
@@ -143,48 +169,72 @@ static void indicator_task(void *pvParameters)
 //  indicator_init()
 //
 //  КРАТКО: Инициализирует RGB-светодиод и запускает задачу индикации.
+//          Повторный вызов безопасен — вторая задача не создаётся.
 //
-//  Возвращает esp_err_t — типовой код ошибки ESP-IDF. [ESP-IDF, esp_err.h]
-//  Возможные значения: ESP_OK, иные ESP_ERR_*.
-//
+//  Возвращает esp_err_t: ESP_OK или код ошибки. [ESP-IDF, esp_err.h]
 //  Параметры: gpio_num — GPIO встроенного WS2812. [стандарт C, int]
 // ============================================================================
 esp_err_t indicator_init(int gpio_num)
 {
+    if (s_task != NULL)
+    {
+        // Задача уже работает — второй раз не создаём.
+        return ESP_OK;
+    }
+
     esp_err_t err = rgb_led_init(gpio_num);
-    // Инициализируем драйвер светодиода. [наш rgb_led.h] + [ESP-IDF, esp_err.h]
+    // Инициализируем драйвер светодиода. [наш rgb_led.h]
 
     if (err != ESP_OK)
     {
-        // Если драйвер не создан — логируем и выходим. [ESP-IDF, esp_err.h]
-
-        ESP_LOGE(TAG, "Не удалось инициализировать RGB на GPIO%d", gpio_num);
-        // Сообщаем об ошибке. [ESP-IDF, esp_log.h]
-
+        ESP_LOGE(TAG, "Не удалось инициализировать RGB на GPIO%d (0x%X)", gpio_num, (unsigned)err);
         return err;
-        // Возвращаем код ошибки наверх. [ESP-IDF, esp_err.h]
     }
 
-    BaseType_t ok = xTaskCreate(indicator_task, "indicator", INDICATOR_TASK_STACK,
-                                NULL, INDICATOR_TASK_PRIO, NULL);
-    // Создаём задачу индикации. [FreeRTOS, freertos/task.h]
-
-    if (ok != pdPASS)
+    if (xTaskCreate(indicator_task, "indicator", INDICATOR_TASK_STACK,
+                    NULL, INDICATOR_TASK_PRIO, &s_task) != pdPASS)
     {
-        // Не удалось создать задачу — логируем и выходим. [FreeRTOS, freertos/task.h]
+        // Задачу создать не удалось — освобождаем светодиод.
+        s_task = NULL;
+        rgb_led_deinit();
 
         ESP_LOGE(TAG, "Не удалось создать задачу индикации");
-        // Сообщаем об ошибке. [ESP-IDF, esp_log.h]
-
         return ESP_FAIL;
-        // Возвращаем общий код ошибки. [ESP-IDF, esp_err.h]
     }
 
     ESP_LOGI(TAG, "Индикатор запущен на GPIO%d", gpio_num);
-    // Логируем успешный запуск. [ESP-IDF, esp_log.h]
-
     return ESP_OK;
-    // Возвращаем успех. [ESP-IDF, esp_err.h]
+}
+
+// ============================================================================
+//  indicator_deinit()
+//
+//  КРАТКО: Останавливает задачу индикации, сбрасывает маски и гасит RGB.
+//          Повторный вызов безопасен.
+//
+//  Возвращает esp_err_t: ESP_OK или код ошибки драйвера. [ESP-IDF, esp_err.h]
+// ============================================================================
+esp_err_t indicator_deinit(void)
+{
+    if (s_task != NULL)
+    {
+        vTaskDelete(s_task);
+        // Останавливаем задачу индикации. [FreeRTOS, freertos/task.h]
+
+        s_task = NULL;
+    }
+
+    portENTER_CRITICAL(&s_lock);
+    s_errors = 0;
+    s_warnings = 0;
+    portEXIT_CRITICAL(&s_lock);
+    // Сбрасываем маски ошибок и предупреждений. [наш indicator.c]
+
+    s_state = -1;
+    // Следующий запуск начнёт логировать состояние заново. [наш indicator.c]
+
+    return rgb_led_deinit();
+    // Гасим и освобождаем светодиод. [наш rgb_led.h]
 }
 
 // ============================================================================
@@ -213,9 +263,6 @@ void indicator_report_error(indicator_source_t src)
 
     portEXIT_CRITICAL(&s_lock);
     // Выходим из критической секции. [FreeRTOS, freertos/FreeRTOS.h]
-
-    ESP_LOGW(TAG, "Источник %d: ошибка активна", (int)src);
-    // Логируем событие. [ESP-IDF, esp_log.h]
 }
 
 // ============================================================================
@@ -244,9 +291,6 @@ void indicator_clear_error(indicator_source_t src)
 
     portEXIT_CRITICAL(&s_lock);
     // Выходим из критической секции. [FreeRTOS, freertos/FreeRTOS.h]
-
-    ESP_LOGI(TAG, "Источник %d: ошибка снята", (int)src);
-    // Логируем событие. [ESP-IDF, esp_log.h]
 }
 
 // ============================================================================
