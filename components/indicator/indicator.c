@@ -48,6 +48,15 @@ static const char *TAG = "INDICATOR";
 #define INDICATOR_BLINK_PAUSE_MS 1500
 // Пауза между сериями вспышек, мс. [наш indicator.c]
 
+#define INDICATOR_SLICE_MS 50
+// Шаг нарезки длинных задержек: между шагами проверяем запрос остановки. [наш indicator.c]
+
+#define INDICATOR_STOP_TIMEOUT_MS 5000
+// Максимум ожидания самостоятельного выхода задачи при deinit, мс. [наш indicator.c]
+
+#define INDICATOR_STOP_POLL_MS 10
+// Период опроса флага остановки при deinit, мс. [наш indicator.c]
+
 static volatile uint32_t s_errors = 0;
 // Битовая маска активных ошибок: бит i = 1 → источник i в ошибке. [наш indicator.c]
 
@@ -64,12 +73,93 @@ static int s_state = -1;
 // Последнее выведенное состояние: -1 — старт, 0 — норма, 1 — предупреждение,
 // 2 — ошибка. Нужно только для логирования смены состояния. [наш indicator.c]
 
+static volatile bool s_stop_req = false;
+// Запрос остановки задачи индикации: true — задача должна завершиться сама. [наш indicator.c]
+
+// ============================================================================
+//  s_read_masks()
+//
+//  КРАТКО: Атомарно копирует обе маски состояния в локальные переменные.
+//
+//  Возвращает void — ничего. [стандарт C]
+//  Параметры: errors / warnings — куда записать маски. [стандарт C, stdint.h]
+// ============================================================================
+static void s_read_masks(uint32_t *errors, uint32_t *warnings)
+{
+    // Копируем обе маски за один захват критической секции,
+    // чтобы не получить «смешанное» состояние. [наш indicator.c]
+
+    portENTER_CRITICAL(&s_lock);
+
+    *errors = s_errors;
+    *warnings = s_warnings;
+
+    portEXIT_CRITICAL(&s_lock);
+}
+
+// ============================================================================
+//  s_errors_active()
+//
+//  КРАТКО: Проверяет, осталась ли хотя бы одна активная ошибка.
+//          Используется для прерывания серии мигания при снятии ошибки.
+//
+//  Возвращает bool: true — есть активная ошибка. [стандарт C, stdbool.h]
+// ============================================================================
+static bool s_errors_active(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    uint32_t errs = s_errors;
+    portEXIT_CRITICAL(&s_lock);
+
+    return errs != 0;
+}
+
+// ============================================================================
+//  ind_delay()
+//
+//  КРАТКО: Задержка, нарезанная на шаги INDICATOR_SLICE_MS.
+//          Позволяет задаче быстро заметить запрос остановки при deinit.
+//
+//  Возвращает bool: false — запрошена остановка, задержка прервана.
+//  Параметры: ms — общая длительность задержки, мс. [стандарт C, int]
+// ============================================================================
+static bool ind_delay(int ms)
+{
+    int elapsed = 0;
+
+    while (elapsed < ms)
+    {
+        if (s_stop_req)
+        {
+            return false;
+        }
+
+        int slice = ms - elapsed;
+        // Последний шаг — ровно остаток, без удлинения. [стандарт C]
+
+        if (slice > INDICATOR_SLICE_MS)
+        {
+            slice = INDICATOR_SLICE_MS;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(slice));
+        elapsed += slice;
+    }
+
+    return !s_stop_req;
+}
+
 // ============================================================================
 //  indicator_task()
 //
 //  КРАТКО: Задача FreeRTOS, управляет RGB-светодиодом по текущему состоянию.
+//          Состояние перечитывается при каждой нотификации (вызовы report/clear/
+//          set_warning будят задачу сразу) и, страховочно, с периодом
+//          INDICATOR_POLL_MS. Серия красных вспышек прерывается сразу после
+//          снятия ошибки. Остановка — кооперативная: по s_stop_req задача
+//          выходит сама и удаляет себя через vTaskDelete(NULL).
 //
-//  Возвращает void — ничего (задача работает вечно). [стандарт C]
+//  Возвращает void — ничего (удаляет саму себя при остановке). [стандарт C]
 //  Параметры: pvParameters — не используется (стандарт FreeRTOS). [FreeRTOS, freertos/task.h]
 // ============================================================================
 static void indicator_task(void *pvParameters)
@@ -77,9 +167,9 @@ static void indicator_task(void *pvParameters)
     (void)pvParameters;
     // Явно помечаем неиспользуемый параметр, чтобы не было warning. [стандарт C]
 
-    while (1)
+    while (!s_stop_req)
     {
-        // Бесконечный цикл индикации. [FreeRTOS, freertos/task.h]
+        // Бесконечный цикл индикации; выход — по запросу остановки. [наш indicator.c]
 
         uint32_t errs;
         // Локальная копия маски ошибок. [стандарт C, stdint.h]
@@ -87,17 +177,8 @@ static void indicator_task(void *pvParameters)
         uint32_t warns;
         // Локальная копия маски предупреждений. [стандарт C, stdint.h]
 
-        portENTER_CRITICAL(&s_lock);
-        // Входим в критическую секцию — читаем атомарно. [FreeRTOS, freertos/FreeRTOS.h]
-
-        errs = s_errors;
-        // Считываем маску ошибок. [наш indicator.c]
-
-        warns = s_warnings;
-        // Считываем маску предупреждений. [наш indicator.c]
-
-        portEXIT_CRITICAL(&s_lock);
-        // Выходим из критической секции. [FreeRTOS, freertos/FreeRTOS.h]
+        s_read_masks(&errs, &warns);
+        // Атомарно читаем обе маски. [наш indicator.c]
 
         if (errs != 0)
         {
@@ -110,25 +191,42 @@ static void indicator_task(void *pvParameters)
                 ESP_LOGE(TAG, "Индикация: ошибка");
             }
 
-            for (int i = 0; i < INDICATOR_BLINK_COUNT; i++)
+            bool series_ok = true;
+            // false — серия прервана (остановка задачи). [стандарт C, stdbool.h]
+
+            for (int i = 0; i < INDICATOR_BLINK_COUNT && series_ok; i++)
             {
                 // Серия быстрых вспышек. [стандарт C]
+
+                if (!s_errors_active())
+                {
+                    // Ошибка уже снята — серию не продолжаем, задача
+                    // немедленно перейдёт к новому состоянию. [наш indicator.c]
+                    break;
+                }
 
                 rgb_led_set(&RGB_COLOR_RED);
                 // Включаем красный. [наш rgb_led.h]
 
-                vTaskDelay(pdMS_TO_TICKS(INDICATOR_BLINK_ON_MS));
-                // Держим красный 100 мс. [FreeRTOS, freertos/task.h]
+                series_ok = ind_delay(INDICATOR_BLINK_ON_MS);
+                // Держим красный 100 мс (прерываемо при остановке). [наш indicator.c]
 
-                rgb_led_off();
-                // Гасим светодиод. [наш rgb_led.h]
+                if (series_ok)
+                {
+                    rgb_led_off();
+                    // Гасим светодиод. [наш rgb_led.h]
 
-                vTaskDelay(pdMS_TO_TICKS(INDICATOR_BLINK_OFF_MS));
-                // Пауза 100 мс. [FreeRTOS, freertos/task.h]
+                    series_ok = ind_delay(INDICATOR_BLINK_OFF_MS);
+                    // Пауза 100 мс (прерываема при остановке). [наш indicator.c]
+                }
             }
 
-            vTaskDelay(pdMS_TO_TICKS(INDICATOR_BLINK_PAUSE_MS));
-            // Длинная пауза 1500 мс перед следующей серией. [FreeRTOS, freertos/task.h]
+            if (series_ok && !s_stop_req)
+            {
+                // Длинная пауза 1500 мс перед следующей серией.
+                // Нотификация прерывает её сразу при смене состояния. [FreeRTOS, freertos/task.h]
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(INDICATOR_BLINK_PAUSE_MS));
+            }
         }
         else if (warns != 0)
         {
@@ -143,8 +241,8 @@ static void indicator_task(void *pvParameters)
             rgb_led_set(&RGB_COLOR_YELLOW);
             // Горим жёлтым постоянно. [наш rgb_led.h]
 
-            vTaskDelay(pdMS_TO_TICKS(INDICATOR_POLL_MS));
-            // Ждём 500 мс и опрашиваем состояние снова. [FreeRTOS, freertos/task.h]
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(INDICATOR_POLL_MS));
+            // Ждём смену состояния (нотификация) или страховочные 500 мс. [наш indicator.c]
         }
         else
         {
@@ -159,10 +257,19 @@ static void indicator_task(void *pvParameters)
             rgb_led_set(&RGB_COLOR_GREEN);
             // Горим зелёным постоянно. [наш rgb_led.h]
 
-            vTaskDelay(pdMS_TO_TICKS(INDICATOR_POLL_MS));
-            // Ждём 500 мс и опрашиваем состояние снова. [FreeRTOS, freertos/task.h]
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(INDICATOR_POLL_MS));
+            // Ждём смену состояния (нотификация) или страховочные 500 мс. [наш indicator.c]
         }
     }
+
+    portENTER_CRITICAL(&s_lock);
+    s_task = NULL;
+    portEXIT_CRITICAL(&s_lock);
+    // Помечаем задачу остановленной под локом: сеттеры, читающие s_task
+    // внутри этой же секции, не смогут уведомить уже удалённую задачу. [наш indicator.c]
+
+    vTaskDelete(NULL);
+    // Удаляем сами себя; выполнение дальше не идёт. [FreeRTOS, freertos/task.h]
 }
 
 // ============================================================================
@@ -191,6 +298,9 @@ esp_err_t indicator_init(int gpio_num)
         return err;
     }
 
+    s_stop_req = false;
+    // Сбрасываем запрос остановки — задача должна запуститься вновь. [наш indicator.c]
+
     if (xTaskCreate(indicator_task, "indicator", INDICATOR_TASK_STACK,
                     NULL, INDICATOR_TASK_PRIO, &s_task) != pdPASS)
     {
@@ -218,10 +328,33 @@ esp_err_t indicator_deinit(void)
 {
     if (s_task != NULL)
     {
-        vTaskDelete(s_task);
-        // Останавливаем задачу индикации. [FreeRTOS, freertos/task.h]
+        s_stop_req = true;
+        // Просим задачу завершиться: она выходит из цикла сама
+        // и удаляет себя через vTaskDelete(NULL).
+        // Нарочно НЕ шлём нотификацию: задача могла успеть завершиться
+        // между проверкой и notify — notify по освобождённому TCB недопустим.
+        // Пробуждение и так наступает в течение ≤ 1500 мс
+        // (таймауты ulTaskNotifyTake / шаги ind_delay). [наш indicator.c]
 
-        s_task = NULL;
+        for (int i = 0; i < INDICATOR_STOP_TIMEOUT_MS / INDICATOR_STOP_POLL_MS && s_task != NULL; i++)
+        {
+            vTaskDelay(pdMS_TO_TICKS(INDICATOR_STOP_POLL_MS));
+            // Ждём, пока задача выйдет и обнулит s_task. [наш indicator.c]
+        }
+
+        if (s_task != NULL)
+        {
+            // Страховка: задача не заметила запрос (например, зависла в драйвере).
+            // Удаляем принудительно — иначе deinit зависнет навсегда. [FreeRTOS, freertos/task.h]
+            ESP_LOGE(TAG, "Задача индикации не остановилась за %d мс — удаляю принудительно",
+                     INDICATOR_STOP_TIMEOUT_MS);
+
+            vTaskDelete(s_task);
+            s_task = NULL;
+        }
+
+        s_stop_req = false;
+        // Готовим флаг к возможному повторному init(). [наш indicator.c]
     }
 
     portENTER_CRITICAL(&s_lock);
@@ -261,6 +394,14 @@ void indicator_report_error(indicator_source_t src)
     s_errors |= (1u << src);
     // Ставим бит источника в маске ошибок. [стандарт C]
 
+    if (s_task != NULL)
+    {
+        xTaskNotifyGive(s_task);
+        // Будим задачу индикации — она увидит ошибку сразу, без ожидания
+        // опроса. Notify строго внутри критической секции: задача обнуляет
+        // s_task под тем же локом до self-delete — гонки с notify нет. [FreeRTOS, freertos/task.h]
+    }
+
     portEXIT_CRITICAL(&s_lock);
     // Выходим из критической секции. [FreeRTOS, freertos/FreeRTOS.h]
 }
@@ -288,6 +429,12 @@ void indicator_clear_error(indicator_source_t src)
 
     s_errors &= ~(1u << src);
     // Снимаем бит источника в маске ошибок. [стандарт C]
+
+    if (s_task != NULL)
+    {
+        xTaskNotifyGive(s_task);
+        // Будим задачу — снятие ошибки тоже должно отразиться сразу. [FreeRTOS, freertos/task.h]
+    }
 
     portEXIT_CRITICAL(&s_lock);
     // Выходим из критической секции. [FreeRTOS, freertos/FreeRTOS.h]
@@ -328,6 +475,12 @@ void indicator_set_warning(indicator_source_t src, bool active)
 
         s_warnings &= ~(1u << src);
         // Снимаем бит источника в маске предупреждений. [стандарт C]
+    }
+
+    if (s_task != NULL)
+    {
+        xTaskNotifyGive(s_task);
+        // Будим задачу — смена предупреждения отражается сразу. [FreeRTOS, freertos/task.h]
     }
 
     portEXIT_CRITICAL(&s_lock);

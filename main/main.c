@@ -1,7 +1,9 @@
 // ============================================================================
 //  main/main.c
 //
-//  Точка входа. Запускает библиотеку DS18B20 и выводит показания в консоль.
+//  Точка входа. Запускает библиотеку DS18B20; вывод показаний оформлен
+//  колбэком, который библиотека вызывает после каждого цикла опроса —
+//  main не опрашивает шину и не крутит собственный цикл печати.
 // ============================================================================
 
 #include "ds18b20_sensor.h"
@@ -31,24 +33,21 @@ static const char *TAG = "MAIN";
 #define SENSOR_PERIOD_MS 1000
 // Период опроса датчиков, мс: 1 раз в секунду. [наш main.c]
 
-#define PRINT_PERIOD_MS 1000
-// Период вывода в консоль, мс. [наш main.c]
+#define IDLE_PERIOD_MS 1000
+// Период «сна» основного цикла, мс (вывод идёт из колбэка). [наш main.c]
 
-static const char *status_name(ds18b20_status_t status)
+static void on_readings(const ds18b20_info_t *infos, int count)
 {
-    // Текстовое имя статуса для консоли. [наш main.c]
+    // Колбэк нового цикла чтения: печатаем строки показаний.
+    // Вызывается задачей опроса библиотеки после каждого цикла. [наш ds18b20_sensor.h]
 
-    if (status == DS18B20_STATUS_OK)
+    for (int i = 0; i < count; i++)
     {
-        return "OK";
+        ESP_LOGI(TAG, "DS18B20[%d] 0x%016" PRIx64 ": %.2f C (%s)",
+                 i, infos[i].address, infos[i].temperature,
+                 ds18b20_status_name(infos[i].status));
+        // Статус — текстом из библиотеки. [наш ds18b20_sensor.h]
     }
-
-    if (status == DS18B20_STATUS_WARNING)
-    {
-        return "WARN";
-    }
-
-    return "ERROR";
 }
 
 void app_main(void)
@@ -58,40 +57,35 @@ void app_main(void)
     ds18b20_sensor_set_period_ms(SENSOR_PERIOD_MS);
     // Задаём период опроса до запуска (можно любое значение ≥ 1000 мс). [наш ds18b20_sensor.h]
 
-    ds18b20_sensor_run(ONEWIRE_BUS_GPIO, RGB_LED_GPIO);
+    ds18b20_sensor_set_callback(on_readings);
+    // Вывод показаний — из колбэка, без цикла печати в main. [наш ds18b20_sensor.h]
+
+    esp_err_t err = ds18b20_sensor_run(ONEWIRE_BUS_GPIO, RGB_LED_GPIO);
     // Индикация + датчики + фоновый опрос — одним вызовом. [наш ds18b20_sensor.h]
 
-    const int count = ds18b20_sensor_count();
-    // Сколько датчиков найдено. [наш ds18b20_sensor.h]
-
-    if (count == 0)
+    if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "Датчики не найдены: проверьте DQ=GPIO%d и резистор 4.7 кОм",
-                 ONEWIRE_BUS_GPIO);
+        ESP_LOGE(TAG, "Запуск DS18B20 завершился ошибкой (0x%X); DQ=GPIO%d, нужен резистор 4.7 кОм",
+                 (unsigned)err, ONEWIRE_BUS_GPIO);
+        // Подробности уже залогированы внутри init(); здесь — итог для main. [наш ds18b20_sensor.h]
     }
 
     while (1)
     {
-        // Выводим последние показания из кэша библиотеки.
-        // Шину здесь не трогаем — её опрашивает фоновая задача. [наш ds18b20_sensor.h]
+        // Сначала ждём: первый цикл опроса завершится примерно через 800 мс
+        // (время преобразования 12 бит) — раньше читать в кэше нечего. [наш ds18b20_sensor.h]
+        vTaskDelay(pdMS_TO_TICKS(IDLE_PERIOD_MS));
 
-        for (int i = 0; i < count; i++)
+        if (ds18b20_sensor_count() > 0)
         {
-            uint64_t address = 0;
-            // ROM-адрес датчика. [стандарт C, stdint.h]
+            float T1 = ds18b20_sensor_get_temperature(0);
+            // Текущая температура первого датчика из кэша; шина не опрашивается. [наш ds18b20_sensor.h]
 
-            ds18b20_sensor_get_address(i, &address);
-            // Адрес берётся из дескриптора. [наш ds18b20_sensor.h]
-
-            float t = ds18b20_sensor_get_temperature(i);
-            // Температура, °C. [наш ds18b20_sensor.h]
-
-            ESP_LOGI(TAG, "DS18B20[%d] 0x%016" PRIx64 ": %.2f C (%s)",
-                     i, address, t, status_name(ds18b20_sensor_get_status(i)));
-            // Печатаем строку показаний. [ESP-IDF, esp_log.h]
+            ESP_LOGI(TAG, "T1 = %.2f C (%s)", T1,
+                     ds18b20_status_name(ds18b20_sensor_get_status(0)));
+            // %.2f — выводим значение; статус рядом, чтобы видеть достоверность. [ESP-IDF, esp_log.h]
         }
 
-        vTaskDelay(pdMS_TO_TICKS(PRINT_PERIOD_MS));
-        // Ждём период вывода. [FreeRTOS, freertos/task.h]
+        // Расчёт/передача по T1 — здесь, внутри цикла, по свежему значению.
     }
 }

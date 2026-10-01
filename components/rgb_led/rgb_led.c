@@ -158,7 +158,15 @@ esp_err_t rgb_led_off(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    s_current = RGB_COLOR_OFF;
-    return led_strip_clear(s_led);
+    esp_err_t err = led_strip_clear(s_led);
     // Гасим пиксели и обновляем светодиод. [espressif/led_strip, led_strip.h]
+
+    if (err == ESP_OK)
+    {
+        // Кэш обновляем только при успехе — иначе состояние разойдётся со светодиодом,
+        // как в rgb_led_set(). [наш rgb_led.c]
+        s_current = RGB_COLOR_OFF;
+    }
+
+    return err;
 }

@@ -36,12 +36,14 @@ extern "C"
     // gpio_num — GPIO встроенного WS2812. [стандарт C, int]
 
     esp_err_t indicator_deinit(void);
-    // Остановка задачи индикации, сброс масок, освобождение светодиода. [наш indicator.h]
+    // Остановка задачи индикации (кооперативно, с таймаутом), сброс масок,
+    // освобождение светодиода. [наш indicator.h]
 
     // Возвращает void — ничего. [стандарт C]
     void indicator_report_error(indicator_source_t src);
     // Сообщить об ошибке связи от источника. [наш indicator.h]
     // Ошибка остаётся активной до вызова indicator_clear_error(). [наш indicator.h]
+    // Задача индикации просыпается сразу же (нотификация FreeRTOS). [наш indicator.h]
 
     // Возвращает void — ничего. [стандарт C]
     void indicator_clear_error(indicator_source_t src);

@@ -39,9 +39,6 @@
 #include <math.h>
 // fabsf для сравнения float. [стандарт C, math.h]
 
-#include <string.h>
-// memset. [стандарт C, string.h]
-
 static const char *TAG = "DS18B20";
 // Тег логов. [наш ds18b20_sensor.c]
 
@@ -53,6 +50,16 @@ static const char *TAG = "DS18B20";
 
 #define TASK_PRIO 5
 // Приоритет задачи опроса. [FreeRTOS, freertos/task.h]
+
+#define TASK_SLICE_MS 50
+// Шаг нарезки паузы между опросами: между шагами проверяем запрос остановки. [наш ds18b20_sensor.c]
+
+#define TASK_STOP_TIMEOUT_MS 5000
+// Максимум ожидания самостоятельного выхода задачи при deinit, мс.
+// Больше периода преобразования (800 мс) с большим запасом. [наш ds18b20_sensor.c]
+
+#define TASK_STOP_POLL_MS 10
+// Период опроса флага остановки при deinit, мс. [наш ds18b20_sensor.c]
 
 #define ONEWIRE_MAX_RX_BYTES 10
 // Буфер приёма RMT: 9 байт scratchpad + запас. [espressif/onewire_bus, onewire_bus.h]
@@ -81,11 +88,26 @@ static ds18b20_status_t s_overall_status = DS18B20_STATUS_ERROR;
 static SemaphoreHandle_t s_lock = NULL;
 // Защита s_readings и s_overall_status от гонок. [FreeRTOS, freertos/semphr.h]
 
+static SemaphoreHandle_t s_bus_lock = NULL;
+// Сериализация обращений к шине: фоновая задача и вызов read_all() из main
+// не должны одновременно выполнять convert/scratchpad-последовательность. [FreeRTOS, freertos/semphr.h]
+
 static int s_period_ms = DS18B20_PERIOD_MS;
 // Период фонового опроса, мс. [наш ds18b20_sensor.c]
 
 static TaskHandle_t s_task = NULL;
 // Задача фонового опроса: NULL — не запущена. [FreeRTOS, freertos/task.h]
+
+static volatile bool s_stop_req = false;
+// Запрос остановки задачи опроса: true — задача должна завершиться сама. [наш ds18b20_sensor.c]
+
+static ds18b20_on_readings_t s_callback = NULL;
+// Колбэк нового цикла чтения; NULL — не задан. [наш ds18b20_sensor.h]
+
+static int s_published = -1;
+// Последнее опубликованное в indicator состояние; -1 — ещё ничего не публиковалось.
+// Нужно, чтобы публикация и лог шли только при смене состояния, но первая
+// публикация (даже «ошибка») состоялась всегда. [наш ds18b20_sensor.c]
 
 // Внутренние функции.
 static void s_publish(ds18b20_status_t worst);
@@ -101,52 +123,42 @@ static void s_task_body(void *pvParameters);
 //  s_publish()
 //
 //  КРАТКО: Передаёт состояние в агрегатор indicator и пишет в лог только
-//          смену состояния, без повторов каждую секунду.
+//          смену состояния: и публикация, и лог выполняются один раз
+//          на изменение, а не каждую секунду.
 //
 //  Возвращает void — ничего. [стандарт C]
 //  Параметры: worst — «худший» статус среди датчиков. [наш ds18b20_sensor.h]
 // ============================================================================
 static void s_publish(ds18b20_status_t worst)
 {
-    static ds18b20_status_t published = DS18B20_STATUS_ERROR;
-    // Последнее опубликованное состояние. [наш ds18b20_sensor.c]
+    if ((int)worst == s_published)
+    {
+        // Состояние не изменилось — ни в indicator, ни в лог ничего не шлём. [наш ds18b20_sensor.c]
+        return;
+    }
+
+    s_published = (int)worst;
 
     if (worst == DS18B20_STATUS_ERROR)
     {
         // Ошибка связи или данных нет.
         indicator_report_error(INDICATOR_SRC_DS18B20);
         indicator_set_warning(INDICATOR_SRC_DS18B20, false);
+        ESP_LOGE(TAG, "Состояние: ошибка связи или нет данных");
     }
     else if (worst == DS18B20_STATUS_WARNING)
     {
         // Связь есть, но температура вне диапазона.
         indicator_clear_error(INDICATOR_SRC_DS18B20);
         indicator_set_warning(INDICATOR_SRC_DS18B20, true);
+        ESP_LOGW(TAG, "Состояние: температура вне диапазона");
     }
     else
     {
         // Всё хорошо.
         indicator_clear_error(INDICATOR_SRC_DS18B20);
         indicator_set_warning(INDICATOR_SRC_DS18B20, false);
-    }
-
-    if (worst != published)
-    {
-        // Состояние изменилось — сообщаем один раз. [ESP-IDF, esp_log.h]
-        published = worst;
-
-        if (worst == DS18B20_STATUS_ERROR)
-        {
-            ESP_LOGE(TAG, "Состояние: ошибка связи или нет данных");
-        }
-        else if (worst == DS18B20_STATUS_WARNING)
-        {
-            ESP_LOGW(TAG, "Состояние: температура вне диапазона");
-        }
-        else
-        {
-            ESP_LOGI(TAG, "Состояние: норма");
-        }
+        ESP_LOGI(TAG, "Состояние: норма");
     }
 }
 
@@ -184,8 +196,11 @@ static void s_destroy(void)
 //  КРАТКО: Задача FreeRTOS — опрашивает датчики с заданным периодом.
 //          Период отсчитывается от начала цикла, поэтому фактический интервал
 //          равен s_period_ms, а не «период + время преобразования».
+//          Пауза нарезается на шаги TASK_SLICE_MS, чтобы задача быстро
+//          заметила запрос остановки. Выход кооперативный: по s_stop_req
+//          задача сама удаляет себя через vTaskDelete(NULL).
 //
-//  Возвращает void — работает до удаления задачи. [стандарт C]
+//  Возвращает void — удаляет саму себя при остановке. [стандарт C]
 //  Параметры: pvParameters — не используется. [FreeRTOS, freertos/task.h]
 // ============================================================================
 static void s_task_body(void *pvParameters)
@@ -193,7 +208,7 @@ static void s_task_body(void *pvParameters)
     (void)pvParameters;
     // Параметр не используется. [стандарт C]
 
-    while (1)
+    while (!s_stop_req)
     {
         TickType_t start = xTaskGetTickCount();
         // Начало цикла. [FreeRTOS, freertos/task.h]
@@ -207,12 +222,24 @@ static void s_task_body(void *pvParameters)
         TickType_t period = pdMS_TO_TICKS(s_period_ms);
         // Заданный период в тиках. [FreeRTOS, freertos/task.h]
 
-        if (elapsed < period)
+        TickType_t remaining = (elapsed < period) ? (period - elapsed) : 0;
+        // Сколько осталось доспать; если опрос длился дольше периода — не ждём. [наш ds18b20_sensor.c]
+
+        while (remaining > 0 && !s_stop_req)
         {
-            vTaskDelay(period - elapsed);
-            // Досыпаем остаток периода. [FreeRTOS, freertos/task.h]
+            // Нарезанная пауза: между шагами проверяем запрос остановки. [наш ds18b20_sensor.c]
+
+            TickType_t slice = pdMS_TO_TICKS(TASK_SLICE_MS);
+            vTaskDelay(slice < remaining ? slice : remaining);
+            remaining -= (slice < remaining ? slice : remaining);
         }
     }
+
+    s_task = NULL;
+    // Помечаем задачу остановленной — deinit продолжит освобождение ресурсов. [наш ds18b20_sensor.c]
+
+    vTaskDelete(NULL);
+    // Удаляем сами себя; выполнение дальше не идёт. [FreeRTOS, freertos/task.h]
 }
 
 // ============================================================================
@@ -240,6 +267,11 @@ esp_err_t ds18b20_sensor_init(int gpio_num)
         s_destroy();
     }
 
+    s_published = -1;
+    // Сброс кэша публикации: после (ре)инициализации первый s_publish()
+    // обязан пройти, даже если состояние совпадает с прежним —
+    // indicator мог быть переинициализирован и маски сброшены. [наш ds18b20_sensor.c]
+
     if (s_lock == NULL)
     {
         s_lock = xSemaphoreCreateMutex();
@@ -252,7 +284,26 @@ esp_err_t ds18b20_sensor_init(int gpio_num)
         }
     }
 
-    memset(s_readings, 0, sizeof(s_readings));
+    if (s_bus_lock == NULL)
+    {
+        s_bus_lock = xSemaphoreCreateMutex();
+        // Мютекс сериализации обращений к шине (convert + чтение). [FreeRTOS, freertos/semphr.h]
+
+        if (s_bus_lock == NULL)
+        {
+            ESP_LOGE(TAG, "Не удалось создать мютекс шины");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    for (int i = 0; i < DS18B20_MAX_SENSORS; i++)
+    {
+        // Явно: статус 0 — это OK, memset оставил бы «норму» без данных.
+        // До первого успешного чтения данных нет. [наш ds18b20_sensor.c]
+        s_readings[i].temperature = 0.0f;
+        s_readings[i].status = DS18B20_STATUS_ERROR;
+    }
+
     s_overall_status = DS18B20_STATUS_ERROR;
     // Данных ещё нет — состояние не подтверждено. [наш ds18b20_sensor.c]
 
@@ -375,6 +426,11 @@ esp_err_t ds18b20_sensor_init(int gpio_num)
     }
 
     ESP_LOGI(TAG, "Инициализация завершена, датчиков: %d", s_count);
+
+    s_publish(DS18B20_STATUS_ERROR);
+    // До первого чтения данных нет — индикатор красный до первого
+    // успешного цикла (см. s_published = -1 в начале init). [ТЗ.md, раздел 8]
+
     return ESP_OK;
 }
 
@@ -390,10 +446,29 @@ esp_err_t ds18b20_sensor_deinit(void)
 {
     if (s_task != NULL)
     {
-        vTaskDelete(s_task);
-        // Останавливаем задачу опроса. [FreeRTOS, freertos/task.h]
+        s_stop_req = true;
+        // Просим задачу завершиться: она выходит из цикла сама
+        // и удаляет себя через vTaskDelete(NULL). [наш ds18b20_sensor.c]
 
-        s_task = NULL;
+        for (int i = 0; i < TASK_STOP_TIMEOUT_MS / TASK_STOP_POLL_MS && s_task != NULL; i++)
+        {
+            vTaskDelay(pdMS_TO_TICKS(TASK_STOP_POLL_MS));
+            // Ждём, пока задача выйдет из read_all/паузы и обнулит s_task. [наш ds18b20_sensor.c]
+        }
+
+        if (s_task != NULL)
+        {
+            // Страховка: задача не заметила запрос (например, драйвер завис
+            // в передаче). Удаляем принудительно — иначе deinit зависнет. [FreeRTOS, freertos/task.h]
+            ESP_LOGE(TAG, "Задача опроса не остановилась за %d мс — удаляю принудительно",
+                     TASK_STOP_TIMEOUT_MS);
+
+            vTaskDelete(s_task);
+            s_task = NULL;
+        }
+
+        s_stop_req = false;
+        // Готовим флаг к возможному повторному start(). [наш ds18b20_sensor.c]
     }
 
     s_destroy();
@@ -402,13 +477,31 @@ esp_err_t ds18b20_sensor_deinit(void)
     if (s_lock != NULL)
     {
         vSemaphoreDelete(s_lock);
-        // Удаляем мютекс. [FreeRTOS, freertos/semphr.h]
+        // Удаляем мютекс показаний. [FreeRTOS, freertos/semphr.h]
 
         s_lock = NULL;
     }
 
-    memset(s_readings, 0, sizeof(s_readings));
+    if (s_bus_lock != NULL)
+    {
+        vSemaphoreDelete(s_bus_lock);
+        // Удаляем мютекс шины. [FreeRTOS, freertos/semphr.h]
+
+        s_bus_lock = NULL;
+    }
+
+    for (int i = 0; i < DS18B20_MAX_SENSORS; i++)
+    {
+        // Явно: статус 0 — это OK, memset оставил бы «норму» без данных. [наш ds18b20_sensor.c]
+        s_readings[i].temperature = 0.0f;
+        s_readings[i].status = DS18B20_STATUS_ERROR;
+    }
+
     s_overall_status = DS18B20_STATUS_ERROR;
+    s_published = -1;
+    // Сбрасываем кэш публикации — после повторного init() первая публикация
+    // пройдёт заново (indicator мог быть переинициализирован). [наш ds18b20_sensor.c]
+
     s_publish(DS18B20_STATUS_ERROR);
     // Данных больше нет — индикатор покажет ошибку. [наш indicator.h]
 
@@ -462,6 +555,9 @@ esp_err_t ds18b20_sensor_start(void)
         // Опрос уже идёт. [наш ds18b20_sensor.c]
     }
 
+    s_stop_req = false;
+    // Сбрасываем запрос остановки — задача должна запуститься вновь. [наш ds18b20_sensor.c]
+
     if (xTaskCreate(s_task_body, TASK_NAME, TASK_STACK, NULL, TASK_PRIO, &s_task) != pdPASS)
     {
         s_task = NULL;
@@ -491,10 +587,14 @@ int ds18b20_sensor_count(void)
 //  КРАТКО: Одно общее преобразование сразу для всех датчиков (Skip ROM +
 //          Convert T), затем чтение scratchpad каждого. Драйвер сам
 //          выдерживает паузу ≈800 мс внутри вызова, дополнительная
-//          задержка не нужна.
+//          задержка не нужна. Вся последовательность «convert → read»
+//          защищена мьютексом s_bus_lock: параллельный вызов из другой
+//          задачи дождётся окончания, а не перемешает тайминги на шине.
+//          После обновления кэша вызывается заданный колбэк (вне локов).
 //
-//  Возвращает esp_err_t: ESP_OK (есть корректные данные), ESP_FAIL (все
-//          датчики не ответили), ESP_ERR_INVALID_STATE (нет инициализации).
+//  Возвращает esp_err_t: ESP_OK (прочитан хотя бы один датчик — в том числе
+//          со статусом WARNING), ESP_FAIL (ни одного), ESP_ERR_INVALID_STATE
+//          (нет инициализации).
 //  Параметры: readings — массив результатов или NULL. [наш ds18b20_sensor.h]
 // ============================================================================
 esp_err_t ds18b20_sensor_read_all(ds18b20_reading_t *readings)
@@ -502,6 +602,12 @@ esp_err_t ds18b20_sensor_read_all(ds18b20_reading_t *readings)
     if (s_count == 0 || s_bus == NULL)
     {
         return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_bus_lock != NULL)
+    {
+        xSemaphoreTake(s_bus_lock, portMAX_DELAY);
+        // Сериализуем «convert + чтение scratchpad» между задачами. [FreeRTOS, freertos/semphr.h]
     }
 
     esp_err_t trig_err = ds18b20_trigger_temperature_conversion_for_all(s_bus);
@@ -518,8 +624,8 @@ esp_err_t ds18b20_sensor_read_all(ds18b20_reading_t *readings)
     ds18b20_status_t worst = DS18B20_STATUS_OK;
     // «Худший» статус среди датчиков. [наш ds18b20_sensor.h]
 
-    bool any_ok = false;
-    // Был ли хотя бы один корректный датчик. [стандарт C, stdbool.h]
+    bool any_read = false;
+    // Прочитан ли хотя бы один датчик (ошибка чтения — не «непрочитанное»). [стандарт C, stdbool.h]
 
     for (int i = 0; i < s_count; i++)
     {
@@ -548,6 +654,9 @@ esp_err_t ds18b20_sensor_read_all(ds18b20_reading_t *readings)
         }
 
         result[i].temperature = temperature;
+        any_read = true;
+        // Датчик ответил и значение прочитано — это «прочитан», даже если
+        // температура вне диапазона (ТЗ F-18: WARNING → ESP_OK). [ТЗ.md, F-18]
 
         if (temperature < DS18B20_TEMP_MIN_VALID || temperature > DS18B20_TEMP_MAX_VALID)
         {
@@ -563,10 +672,15 @@ esp_err_t ds18b20_sensor_read_all(ds18b20_reading_t *readings)
         else
         {
             result[i].status = DS18B20_STATUS_OK;
-            any_ok = true;
 
             ESP_LOGD(TAG, "DS18B20[%d]: %.2f °C", i, temperature);
         }
+    }
+
+    if (s_bus_lock != NULL)
+    {
+        xSemaphoreGive(s_bus_lock);
+        // Шина свободна — дальше только кэш и колбэк. [FreeRTOS, freertos/semphr.h]
     }
 
     if (s_lock != NULL)
@@ -597,7 +711,30 @@ esp_err_t ds18b20_sensor_read_all(ds18b20_reading_t *readings)
     s_publish(worst);
     // Публикуем состояние в indicator. [наш indicator.h]
 
-    return any_ok ? ESP_OK : ESP_FAIL;
+    if (s_callback != NULL)
+    {
+        ds18b20_info_t infos[DS18B20_MAX_SENSORS];
+        // Снимки для колбэка: адрес + показания. [наш ds18b20_sensor.h]
+
+        for (int i = 0; i < s_count; i++)
+        {
+            onewire_device_address_t address = 0;
+            ds18b20_get_device_address(s_sensors[i], &address);
+            // Адрес в дескрипторе, обращений к шине нет. [espressif/ds18b20, ds18b20.h]
+
+            infos[i].address = (uint64_t)address;
+            infos[i].temperature = result[i].temperature;
+            infos[i].status = result[i].status;
+        }
+
+        ds18b20_on_readings_t cb = s_callback;
+        // Локальная копия: колбэк может быть заменён из другой задачи. [наш ds18b20_sensor.h]
+
+        cb(infos, s_count);
+        // Вызов вне s_lock/s_bus_lock — внутри колбэка можно звать get_*. [наш ds18b20_sensor.h]
+    }
+
+    return any_read ? ESP_OK : ESP_FAIL;
 }
 
 // ============================================================================
@@ -703,18 +840,89 @@ esp_err_t ds18b20_sensor_get_address(int index, uint64_t *address)
 }
 
 // ============================================================================
+//  ds18b20_status_name()
+//
+//  КРАТКО: Текстовое имя статуса для вывода в консоль/лог.
+//
+//  Возвращает const char*: "OK" / "WARN" / "ERROR". [стандарт C]
+//  Параметры: status — статус датчика. [наш ds18b20_sensor.h]
+// ============================================================================
+const char *ds18b20_status_name(ds18b20_status_t status)
+{
+    if (status == DS18B20_STATUS_OK)
+    {
+        return "OK";
+    }
+
+    if (status == DS18B20_STATUS_WARNING)
+    {
+        return "WARN";
+    }
+
+    return "ERROR";
+}
+
+// ============================================================================
+//  ds18b20_sensor_set_callback()
+//
+//  КРАТКО: Задаёт колбэк нового цикла чтения. Вызывать до start()/run().
+//
+//  Возвращает void — ничего. [стандарт C]
+//  Параметры: callback — функция колбэка или NULL для отмены. [наш ds18b20_sensor.h]
+// ============================================================================
+void ds18b20_sensor_set_callback(ds18b20_on_readings_t callback)
+{
+    s_callback = callback;
+    // Присваивание указателя атомарно на 32-битной архитектуре; надёжнее
+    // задавать колбэк до запуска задачи, как и указано в заголовке. [наш ds18b20_sensor.h]
+}
+
+// ============================================================================
+//  ds18b20_sensor_get_info()
+//
+//  КРАТКО: Адрес + температура + статус одним захватом мьютекса —
+//          согласованный снимок (в отличие от трёх отдельных геттеров,
+//          между которыми может пройти обновление кэша).
+//
+//  Возвращает esp_err_t: ESP_OK или ESP_ERR_INVALID_ARG. [ESP-IDF, esp_err.h]
+//  Параметры: index — индекс датчика. [стандарт C, int]
+//             info — куда записать снимок. [наш ds18b20_sensor.h]
+// ============================================================================
+esp_err_t ds18b20_sensor_get_info(int index, ds18b20_info_t *info)
+{
+    if (info == NULL || index < 0 || index >= s_count || s_lock == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    onewire_device_address_t address = 0;
+    ds18b20_get_device_address(s_sensors[index], &address);
+    // Адрес в дескрипторе и не меняется после init(); читаем без лока. [espressif/ds18b20, ds18b20.h]
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    info->temperature = s_readings[index].temperature;
+    info->status = s_readings[index].status;
+    xSemaphoreGive(s_lock);
+
+    info->address = (uint64_t)address;
+    return ESP_OK;
+}
+
+// ============================================================================
 //  ds18b20_sensor_run()
 //
 //  КРАТКО: Единая точка входа для main: поднимает индикацию, инициализирует
 //          датчики и запускает фоновый опрос. Возвращается сразу.
-//          Если датчиков нет, ds18b20_sensor_count() вернёт 0, а индикатор
-//          покажет ошибку — решение остаётся за main.
+//          Сбой индикации не фатален (работаем без светодиода), его код
+//          в возврат не попадает. Если датчиков нет, возвращается
+//          ESP_ERR_NOT_FOUND, а индикатор показывает ошибку.
 //
-//  Возвращает void — ничего. [стандарт C]
+//  Возвращает esp_err_t: ESP_OK; ESP_ERR_NOT_FOUND (датчиков нет);
+//          иные ESP_ERR_* от init()/start(). [ESP-IDF, esp_err.h]
 //  Параметры: onewire_gpio — GPIO линии DQ. [стандарт C, int]
 //             rgb_led_gpio — GPIO встроенного WS2812. [стандарт C, int]
 // ============================================================================
-void ds18b20_sensor_run(int onewire_gpio, int rgb_led_gpio)
+esp_err_t ds18b20_sensor_run(int onewire_gpio, int rgb_led_gpio)
 {
     if (indicator_init(rgb_led_gpio) != ESP_OK)
     {
@@ -722,13 +930,15 @@ void ds18b20_sensor_run(int onewire_gpio, int rgb_led_gpio)
         ESP_LOGE(TAG, "Индикация недоступна (GPIO%d) — работаем без неё", rgb_led_gpio);
     }
 
-    if (ds18b20_sensor_init(onewire_gpio) != ESP_OK)
+    esp_err_t err = ds18b20_sensor_init(onewire_gpio);
+
+    if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Не удалось инициализировать DS18B20 на GPIO%d", onewire_gpio);
-        return;
+        return err;
         // Причина уже опубликована в indicator внутри init(). [наш ds18b20_sensor.h]
     }
 
-    ds18b20_sensor_start();
+    return ds18b20_sensor_start();
     // Датчики найдены — включаем периодический опрос. [наш ds18b20_sensor.h]
 }
