@@ -760,6 +760,40 @@ ds18b20_status_t ds18b20_sensor_overall_status(void)
 }
 
 // ============================================================================
+//  ds18b20_sensor_get_reading()
+//
+//  КРАТКО: Снимок одного датчика из кэша (T + статус) одним захватом
+//          мьютекса — согласованные данные без обращения к шине.
+//          В стиле dht11: ds18b20_reading_t ds;
+//          if (ds18b20_sensor_get_reading(0, &ds) == ESP_OK) ...
+//
+//  Возвращает esp_err_t: ESP_OK, ESP_ERR_INVALID_ARG (NULL reading
+//          или index < 0), ESP_ERR_INVALID_STATE (нет init() или
+//          index >= count()). [ESP-IDF, esp_err.h]
+//  Параметры: index — индекс датчика 0..count-1. [стандарт C, int]
+//             reading — куда записать снимок. [наш ds18b20_sensor.h]
+// ============================================================================
+esp_err_t ds18b20_sensor_get_reading(int index, ds18b20_reading_t *reading)
+{
+    if (reading == NULL || index < 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_lock == NULL || index >= s_count)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *reading = s_readings[index];
+    xSemaphoreGive(s_lock);
+    // Показания — строго под мьютексом, это и есть согласованный снимок. [FreeRTOS, freertos/semphr.h]
+
+    return ESP_OK;
+}
+
+// ============================================================================
 //  ds18b20_sensor_get_temperature()
 //
 //  КРАТКО: Последняя температура датчика из кэша — шина не опрашивается.
@@ -883,16 +917,26 @@ void ds18b20_sensor_set_callback(ds18b20_on_readings_t callback)
 //  КРАТКО: Адрес + температура + статус одним захватом мьютекса —
 //          согласованный снимок (в отличие от трёх отдельных геттеров,
 //          между которыми может пройти обновление кэша).
+//          Возвращается по значению, читается как поле структуры —
+//          в стиле dht11: ds18b20_info_t ds = ds18b20_sensor_get_info(0);
+//          float T1 = ds.temperature;
 //
-//  Возвращает esp_err_t: ESP_OK или ESP_ERR_INVALID_ARG. [ESP-IDF, esp_err.h]
-//  Параметры: index — индекс датчика. [стандарт C, int]
-//             info — куда записать снимок. [наш ds18b20_sensor.h]
+//  Возвращает ds18b20_info_t: при неверном index или до init() —
+//          address=0, temperature=0.0f, status=ERROR (нет данных). [наш ds18b20_sensor.h]
+//  Параметры: index — индекс датчика 0..count-1. [стандарт C, int]
 // ============================================================================
-esp_err_t ds18b20_sensor_get_info(int index, ds18b20_info_t *info)
+ds18b20_info_t ds18b20_sensor_get_info(int index)
 {
-    if (info == NULL || index < 0 || index >= s_count || s_lock == NULL)
+    ds18b20_info_t info = {
+        .address = 0,
+        .temperature = 0.0f,
+        .status = DS18B20_STATUS_ERROR,
+    };
+    // Снимок по умолчанию: данных нет / индекс неверен. [наш ds18b20_sensor.h]
+
+    if (index < 0 || index >= s_count || s_lock == NULL)
     {
-        return ESP_ERR_INVALID_ARG;
+        return info;
     }
 
     onewire_device_address_t address = 0;
@@ -900,12 +944,13 @@ esp_err_t ds18b20_sensor_get_info(int index, ds18b20_info_t *info)
     // Адрес в дескрипторе и не меняется после init(); читаем без лока. [espressif/ds18b20, ds18b20.h]
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    info->temperature = s_readings[index].temperature;
-    info->status = s_readings[index].status;
+    info.temperature = s_readings[index].temperature;
+    info.status = s_readings[index].status;
     xSemaphoreGive(s_lock);
+    // Показания — строго под мьютексом, это и есть согласованный снимок. [FreeRTOS, freertos/semphr.h]
 
-    info->address = (uint64_t)address;
-    return ESP_OK;
+    info.address = (uint64_t)address;
+    return info;
 }
 
 // ============================================================================

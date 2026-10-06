@@ -19,3 +19,7 @@ dependencies:
   # Версия 3.x совместима с ESP-IDF v6.x.
   # Источник: https://components.espressif.com/components/espressif/led_strip
   espressif/led_strip: "^3.0.0"
+
+  # Драйвер датчика DHT11 (температура + влажность, 1 GPIO).
+  # Источник: https://components.espressif.com/components/esp-idf-lib/dht
+  esp-idf-lib/dht: "^1.2.0"

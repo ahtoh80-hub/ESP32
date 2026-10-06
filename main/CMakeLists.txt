@@ -9,8 +9,8 @@
 idf_component_register(
     SRCS "main.c"              # какие .c файлы собирать
     INCLUDE_DIRS "."           # где искать заголовки этого компонента
-    REQUIRES ds18b20_sensor
+    REQUIRES ds18b20_sensor dht11_sensor
     # REQUIRES — список наших компонентов, от которых зависит main.
-    # Достаточно одного ds18b20_sensor: он тянет за собой indicator и rgb_led
-    # (см. components/ds18b20_sensor/CMakeLists.txt), а main их API не использует.
+    # ds18b20_sensor тянет за собой indicator и rgb_led — main их API
+    # не использует напрямую. dht11_sensor — датчик DHT11 на GPIO5. [наш main/CMakeLists.txt]
 )

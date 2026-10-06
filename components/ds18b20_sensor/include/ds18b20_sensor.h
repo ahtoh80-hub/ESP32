@@ -17,7 +17,9 @@
 //      ds18b20_sensor_set_period_ms(1000);   // период опроса (по умолчанию 1000 мс)
 //      ds18b20_sensor_set_callback(on_readings); // вывод показаний из колбэка
 //      ds18b20_sensor_run(4, 48);            // индикация + датчики + фоновый опрос
-//      ds18b20_sensor_get_temperature(0);    // чтение из кэша, без обращений к шине
+//      ds18b20_reading_t ds;
+//      ds18b20_sensor_get_reading(0, &ds);   // снимок из кэша, без обращений к шине
+//      float T1 = ds.temperature;            // поле структуры — как rh.temperature в dht11
 // ============================================================================
 
 #pragma once
@@ -110,6 +112,15 @@ extern "C"
     // Опросить все датчики прямо сейчас (блокирует ≈800 мс — время преобразования).
     // readings может быть NULL — тогда результаты доступны через get_temperature(). [наш ds18b20_sensor.h]
 
+    esp_err_t ds18b20_sensor_get_reading(int index, ds18b20_reading_t *reading);
+    // Снимок одного датчика из кэша (температура + статус) одним захватом
+    // мьютекса — согласованные данные без обращения к шине; в стиле dht11:
+    //     ds18b20_reading_t ds;
+    //     if (ds18b20_sensor_get_reading(0, &ds) == ESP_OK)
+    //         float T1 = ds.temperature;
+    // ESP_ERR_INVALID_ARG при NULL reading или index < 0; ESP_ERR_INVALID_STATE
+    // до init() или при index >= count(). [наш ds18b20_sensor.h]
+
     float ds18b20_sensor_get_temperature(int index);
     // Последняя температура датчика, °C (из кэша). 0.0f при неверном index. [наш ds18b20_sensor.h]
 
@@ -122,9 +133,13 @@ extern "C"
     esp_err_t ds18b20_sensor_get_address(int index, uint64_t *address);
     // 64-битный ROM-адрес датчика. ESP_ERR_INVALID_ARG при неверных параметрах. [наш ds18b20_sensor.h]
 
-    esp_err_t ds18b20_sensor_get_info(int index, ds18b20_info_t *info);
-    // Адрес + температура + статус одним захватом мьютекса — согласованный снимок.
-    // ESP_ERR_INVALID_ARG при NULL/неверном index. [наш ds18b20_sensor.h]
+    ds18b20_info_t ds18b20_sensor_get_info(int index);
+    // Адрес + температура + статус одним захватом мьютекса — согласованный снимок,
+    // читается как поле структуры (в стиле dht11: rh.temperature):
+    //     ds18b20_info_t ds = ds18b20_sensor_get_info(0);
+    //     float T1 = ds.temperature;
+    // При неверном index или до init(): address = 0, temperature = 0.0f,
+    // status = ERROR (нет данных). [наш ds18b20_sensor.h]
 
     void ds18b20_sensor_set_callback(ds18b20_on_readings_t callback);
     // Задать колбэк, вызываемый после каждого цикла чтения (NULL — отменить).

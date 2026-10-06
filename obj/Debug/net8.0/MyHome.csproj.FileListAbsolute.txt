@@ -1,0 +1,15 @@
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\bin\Debug\net8.0\MyHome.exe
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\bin\Debug\net8.0\MyHome.deps.json
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\bin\Debug\net8.0\MyHome.runtimeconfig.json
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\bin\Debug\net8.0\MyHome.dll
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\bin\Debug\net8.0\MyHome.pdb
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\obj\Debug\net8.0\MyHome.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\obj\Debug\net8.0\MyHome.AssemblyInfoInputs.cache
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\obj\Debug\net8.0\MyHome.AssemblyInfo.cs
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\obj\Debug\net8.0\MyHome.csproj.CoreCompileInputs.cache
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\obj\Debug\net8.0\MyHome.sourcelink.json
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\obj\Debug\net8.0\MyHome.dll
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\obj\Debug\net8.0\refint\MyHome.dll
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\obj\Debug\net8.0\MyHome.pdb
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\obj\Debug\net8.0\MyHome.genruntimeconfig.cache
+C:\Users\RAN-Notebook\Desktop\PJT\ESP\ds18b20\DS18B20\obj\Debug\net8.0\ref\MyHome.dll

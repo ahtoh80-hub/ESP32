@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "dgSpecHash": "R1wwOFf+2iQ=",
+  "success": true,
+  "projectFilePath": "c:\\Users\\RAN-Notebook\\Desktop\\PJT\\ESP\\ds18b20\\DS18B20\\MyHome.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\RAN-Notebook\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.21\\microsoft.netcore.app.ref.8.0.21.nupkg.sha512",
+    "C:\\Users\\RAN-Notebook\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.21\\microsoft.windowsdesktop.app.ref.8.0.21.nupkg.sha512",
+    "C:\\Users\\RAN-Notebook\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.21\\microsoft.aspnetcore.app.ref.8.0.21.nupkg.sha512",
+    "C:\\Users\\RAN-Notebook\\.nuget\\packages\\microsoft.netcore.app.host.win-x64\\8.0.21\\microsoft.netcore.app.host.win-x64.8.0.21.nupkg.sha512"
+  ],
+  "logs": []
+}

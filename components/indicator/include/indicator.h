@@ -24,6 +24,7 @@ extern "C"
     typedef enum
     {
         INDICATOR_SRC_DS18B20 = 0, // источник: датчики DS18B20. [наш indicator.h]
+        INDICATOR_SRC_DHT11,       // источник: датчик температуры/влажности DHT11. [наш indicator.h]
         // INDICATOR_SRC_BME280,   // будущий источник: BME280. [наш indicator.h]
         // INDICATOR_SRC_SHT31,    // будущий источник: SHT31. [наш indicator.h]
         INDICATOR_SRC_MAX // количество источников (граница массива). [наш indicator.h]
